@@ -1,0 +1,153 @@
+---
+title: "Prediction of Weight Lifting Excercise Manner"
+author: "Md Sabbirul Haque"
+date: "January 30, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This report presents the results of the application of machine learning algorithoms  using a single R markdown document that can be processed and transformed into an HTML file. The goal of this analysis is to predict the manner in which the subjects performed weight lifting exercises. The data is collected from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. The outcome variable has five classes and the total number of predictors are 159. Several packages were installed and loaded at the beginning of the analysis.
+
+###Preparation
+```{r, include=FALSE}
+library(caret)
+library(dplyr)
+library(corrplot)
+library(devtools)
+library(rpart)
+library(ggplot2)
+set.seed(1)
+rm(list=ls())
+```
+
+###Downloading and loading of training and testing data
+```{r}
+url_training<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url_testing<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+if(!file.exists("pml-training.csv")){
+  download.file(url_training, destfile = paste0(getwd(), '/pml-training.csv'))
+  }
+training<-read.csv("pml-training.csv")
+
+
+if(!file.exists("pml-testing.csv")){
+  download.file(url_testing, destfile = paste0(getwd(), '/pml-testing.csv'))
+  }
+testing<-read.csv("pml-testing.csv")
+```
+
+###Data Processing and Cleaning
+Split the data into training and testing data
+```{r}
+training_index <- createDataPartition(training$classe, p=0.7, list=FALSE)
+training_data <- training %>% slice(training_index)
+test_data <- training %>% slice(-training_index)
+dim(training_data)
+dim(test_data)
+```
+
+First I remove the first 5 identification variables
+```{r}
+training_data <- training_data[, -(1:5)]
+dim(training_data)
+```
+
+Then I remove variables with low variance
+```{r}
+NrZrVr <- nearZeroVar(training_data)
+training_data <- training_data[, -NrZrVr]
+dim(training_data)
+```
+
+Then I remove variables with large number of missing values
+```{r}
+missing_ratio<-sapply(names(training_data), function(var) mean(is.na(training_data[ ,var])))
+range(missing_ratio)
+unique(missing_ratio)
+missing<-missing_ratio>0.97
+training_data <- training_data[, !missing]
+dim(training_data)
+```
+
+In the dataset, there are several variables that are highly correlated with each other. I remove those variables that are highly correlated:
+```{r}
+CorrMatrix<-cor(training_data[ , 1:(ncol(training_data)-1)])
+range(CorrMatrix)
+
+corr_cutoff<-0.98
+high_corr<-findCorrelation(CorrMatrix, cutoff = corr_cutoff, names = FALSE)
+training_data<-training_data[ , -high_corr]
+dim(training_data)
+```
+
+A quick (graphical) investigation makes sure that the dataset does not suffer from existance of strongly correlated variables:
+
+```{r}
+CorrMatrix <- cor(training_data[, -ncol(training_data)])
+sum(abs(CorrMatrix)>corr_cutoff & CorrMatrix!=1)
+range(CorrMatrix)
+corrplot(CorrMatrix, order = "FPC", method = "color", type = "lower", 
+         tl.cex = 0.8, tl.col = rgb(0, 0, 0))
+test_data <- test_data[ , names(training_data)]
+```
+
+###Prediction
+I have tried a few number of algorithoms and I tried to optimize those models by tuning the parameters. Finally, I ensemble the models in order to further improve the model performance. After training each of the models, I compare the accuracy and choose the best model that has the lowest out of sample error.
+
+#####Classification Tree Model
+```{r}
+fit_DecTree <-train(classe ~ ., method = "rpart",
+              tuneGrid=data.frame(cp=seq(0, 0.05, len=25)),
+              data = training_data)
+predict_DecTree <- predict(fit_DecTree, newdata=test_data)
+Acc_DecTree <- confusionMatrix(predict_DecTree, test_data$classe)$overall[[1]]
+Acc_DecTree
+```
+The estimated accuracy of the Decision Tree Model is `r Acc_DecTree`. The tree obtained from the Decision Tree Model are prone to comparatively larger variance. In order to minimize this concern, I use Random Forest Model which utilizes many bootstrapped samples and randomly selected subset of predictors in each sample.
+
+
+#####Random forest
+```{r}
+fit_RandFor <-train(classe ~ .,
+              method="rf",
+              data=training_data, 
+              trControl=trainControl(method="cv", number=3, verboseIter=FALSE))
+predict_RandFor <- predict(fit_RandFor, newdata=test_data)
+Acc_RandFor <- confusionMatrix(predict_RandFor, test_data$classe)$overall[[1]]
+Acc_RandFor
+```
+For the Random Forest Model, the estimated accuracy is `r Acc_RandFor`. Notice that the accuracy increases from `r Acc_DecTree` to `r Acc_RandFor`. In an effort to further increase the accuracy, I use Boosting where trees are grown sequentially rather than using randomly selected bootstrap samples.
+
+#####Generalized Boosted Model
+```{r}
+fit_GBM  <- train(classe ~ ., data=training_data,
+              method = "gbm",
+              trControl = trainControl(method = "repeatedcv", number = 5, repeats = 1),
+              verbose = FALSE)
+predict_GBM <- predict(fit_GBM, newdata=test_data)
+Acc_GBM <- confusionMatrix(predict_GBM, test_data$classe)$overall[[1]]
+Acc_GBM
+```
+The accuracy obtained from Generalized Boosted Model is `r Acc_GBM` which is infact outperformed by Random Forest Model. As a matter of final investigation, I combined all the models to predict the manner of weight lifting excercise.
+
+#####Ensembling
+```{r}
+predDF<-data.frame(pred1=predict_DecTree, pred2=predict_RandFor, pred3=predict_GBM, classe=test_data$classe)
+CombModFit<-train(classe ~ ., method="ctree", data=predDF)
+predictEns<-predict(CombModFit, predDF)
+Acc_Ens <- confusionMatrix(predictEns, predDF$classe)$overall[[1]]
+Acc_Ens
+```
+
+The performance of this ensembled model is same as that of Random Forest Model (accuracy `r Acc_Ens`). Although both Random Forest and Ensembling models have similar performance, Considering the computational complexity of Ensembling, my prefered model is Random Forest and the accuracy obtained from this model is `r Acc_RandFor`. The final predicted outcomes using the prefered model Random Forest is as below:
+
+```{r}
+FinalPredict<-predict_RandFor <- predict(fit_RandFor, newdata=testing)
+FinalPredict
+```
+
+
